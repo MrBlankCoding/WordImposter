@@ -8,7 +8,7 @@ intents.message_content = True
 client = commands.Bot(command_prefix='?', intents=intents)
 
 
-TOKEN = "MTI0NDM3NzIzMjM5MTE0MzQ1Ng.GfjPTR.w1qvYL8Y9FIkNTuY3-yorB-2nJeDC2u9uHIU-c"
+TOKEN = ""
 
 joined_users = []
 game_started = False
