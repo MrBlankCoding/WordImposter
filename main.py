@@ -4,12 +4,18 @@ from discord.ext.commands import MemberConverter
 import random
 import asyncio
 import math
+import logging
+from discord.utils import get
+from discord.ext.commands import MissingPermissions
+import discord  
+from discord.utils import get
+from discord.ext.commands import MissingPermissions
 intents = Intents.default()
 intents.message_content = True
 client = commands.Bot(command_prefix='?', intents=intents)
-TOKEN = ":>"
+TOKEN = ""
 
-# Dictionary to store game states for each channel
+
 games = {}
 
 class GameState:
@@ -38,7 +44,22 @@ async def play(ctx):
         game.message_id = message.id
         await message.add_reaction("✅")
     else:
-        await ctx.send("Message me the number 41")
+        await ctx.send("A game has already started. You cannot join now.")
+
+@client.command()
+async def hard(ctx):
+    if ctx.channel.id not in games:
+        games[ctx.channel.id] = GameState()
+
+    game = games[ctx.channel.id]
+
+    if not game.game_started:
+        embed = Embed(title="Hard Mode Game Start", description="React with 🟥 if you want to play!", color=0xff0000)
+        message = await ctx.send(embed=embed)
+        game.message_id = message.id
+        await message.add_reaction("🟥")
+    else:
+        await ctx.send("A game has already started. You cannot join now.")
 
 @client.event
 async def on_raw_reaction_add(payload):
@@ -48,7 +69,7 @@ async def on_raw_reaction_add(payload):
     game = games[payload.channel_id]
 
     if not game.game_started:
-        if payload.emoji.name == "✅" and payload.message_id == game.message_id:
+        if payload.emoji.name in ["✅", "🟥"] and payload.message_id == game.message_id:
             if payload.member and not payload.member.bot:
                 if payload.user_id not in game.joined_users:
                     game.joined_users.append(payload.user_id)
@@ -58,12 +79,11 @@ async def on_raw_reaction_add(payload):
         member = payload.member
         if member:
             print("Someone is using the bot")
-        member = payload.member
 
 @client.command()
-async def start(ctx):
+async def start(ctx, mode='normal'):
     if ctx.channel.id not in games:
-        await ctx.send("No game has been set up in this channel. Use ?play to start a new game.")
+        await ctx.send("No game has been set up in this channel. Use ?play or ?hard to set up a game.")
         return
 
     game = games[ctx.channel.id]
@@ -71,20 +91,26 @@ async def start(ctx):
     if not game.game_started:
         if len(game.joined_users) > 2:
             random_word = generate_random_word('nouns.txt')
-            game.imposter = random.choice(game.joined_users)
+            
+            if mode == 'hard' and len(game.joined_users) > 7:
+                imposters = random.sample(game.joined_users, 2)
+            else:
+                imposters = [random.choice(game.joined_users)]
+                
             for user_id in game.joined_users:
                 user = await client.fetch_user(user_id)
-                if user_id == game.imposter:
-                    await user.send("You are the imposter!")
+                if user_id in imposters:
+                    await user.send("You are an imposter!")
                 else:
-                    await user.send(f"The word is: {random_word}")
+                    await user.send(f"Your random word: {random_word}")
+                    
             game.game_started = True
             await ctx.send("The game has started!")
         else:
             await ctx.send("Not enough users have joined yet.")
     else:
-        await ctx.send("The game has already started.")
-
+        await ctx.send("A game has already started.")
+        
 @client.command()
 async def describe(ctx):
     if ctx.channel.id not in games:
@@ -97,7 +123,7 @@ async def describe(ctx):
         game.description_phase_started = True
         await ctx.send("Description phase has started. Users, please describe your words one by one.")
         for round_number in range(game.num_rounds):
-            await ctx.send(f"Round {round_number + 1}")
+            await ctx.send(f"**Round {round_number + 1}**")
             for user_id in game.joined_users:
                 user = await client.fetch_user(user_id)
                 await ctx.send(f"{user.mention}, please describe your word.")
@@ -115,83 +141,111 @@ async def describe(ctx):
     else:
         await ctx.send("Description phase is already in progress.")
 
+
+
+logging.basicConfig(level=logging.INFO)
+
 async def start_voting(ctx):
     if ctx.channel.id not in games:
-        await ctx.send("No game has been set up in this channel. Use ?play to start a new game.")
+        await ctx.send("No game has been set up in this channel. Use ?play or ?hard to start a new game.")
         return
 
     game = games[ctx.channel.id]
 
     embed = Embed(title="Vote for the Imposter", description="React with the number corresponding to the user you suspect is the imposter.", color=0xff0000)
     
-    for index, user_id in enumerate(game.joined_users, start=1):
-        user = await client.fetch_user(user_id)
-        embed.add_field(name=f"{index}. {user.name}", value=user.id, inline=False)
-    
-    voting_message = await ctx.send(embed=embed)
-    
-    for i in range(1, len(game.joined_users) + 1):
-        await voting_message.add_reaction(str(i) + '️⃣')
-        await asyncio.sleep(1)
-
-    voted_users = set()
-    votes = [0] * len(game.joined_users)
-
-    def check(reaction, user):
-        return user.id in game.joined_users and str(reaction.emoji)[0].isdigit() and user.id not in voted_users
-
     try:
-        while len(voted_users) < len(game.joined_users):
-            reaction, user = await client.wait_for('reaction_add', check=check, timeout=30)
-            voted_users.add(user.id)
-            voted_user_index = int(str(reaction.emoji)[0]) - 1
-            votes[voted_user_index] += 1
+        for index, user_id in enumerate(game.joined_users, start=1):
+            user = await client.fetch_user(user_id)
+            embed.add_field(name=f"{index}. {user.name}", value=user.id, inline=False)
+        
+        voting_message = await ctx.send(embed=embed)
+        
+        for i in range(1, len(game.joined_users) + 1):
+            await voting_message.add_reaction(str(i) + '️⃣')
+            await asyncio.sleep(1)
 
-        await ctx.send("Voting time has expired. Tallying votes...")
+        voted_users = set()
+        votes = [0] * len(game.joined_users)
 
-        max_votes = max(votes)
-        max_voted_users = [i for i, v in enumerate(votes) if v == max_votes]
+        def check(reaction, user):
+            return user.id in game.joined_users and str(reaction.emoji)[0].isdigit() and user.id not in voted_users
 
+        try:
+            while len(voted_users) < len(game.joined_users):
+                reaction, user = await client.wait_for('reaction_add', check=check, timeout=30)
+                voted_users.add(user.id)
+                voted_user_index = int(str(reaction.emoji)[0]) - 1
+                votes[voted_user_index] += 1
+
+            await ctx.send("Voting time has expired. Tallying votes...")
+
+            max_votes = max(votes)
+            max_voted_users = [i for i, v in enumerate(votes) if v == max_votes]
+
+            for reaction in voting_message.reactions:
+                await reaction.clear()
+
+            if len(max_voted_users) == 1:
+                voted_user_index = max_voted_users[0]
+                voted_user_id = game.joined_users[voted_user_index]
+                voted_user = await client.fetch_user(voted_user_id)
+
+                if isinstance(game.imposter, list):
+                    if voted_user_id in game.imposter:
+                        await ctx.send(f"Congratulations! The majority voted for one of the imposters: {voted_user.name}. You win!")
+                    else:
+                        imposter_users = [await client.fetch_user(imposter_id) for imposter_id in game.imposter]
+                        imposters_names = ', '.join(user.name for user in imposter_users)
+                        await ctx.send(f"Sorry, you lose. The majority voted for {voted_user.name}, but the imposters were {imposters_names}.")
+                else:
+                    if voted_user_id == game.imposter:
+                        await ctx.send(f"Congratulations! The majority voted for the imposter: {voted_user.name}. You win!")
+                    else:
+                        imposter_user = await client.fetch_user(game.imposter)
+                        await ctx.send(f"Sorry, you lose. The majority voted for {voted_user.name}, but the imposter was {imposter_user.name}.")
+            else:
+                await ctx.send("There was a tie in the votes. No majority decision was made.")
+
+            await ask_replay(ctx)
+        except asyncio.TimeoutError:
+            await ctx.send("Voting time has expired.")
+
+            for reaction in voting_message.reactions:
+                await reaction.clear()
+
+            max_votes = max(votes)
+            max_voted_users = [i for i, v in enumerate(votes) if v == max_votes]
+
+            if len(max_voted_users) == 1:
+                voted_user_index = max_voted_users[0]
+                voted_user_id = game.joined_users[voted_user_index]
+                voted_user = await client.fetch_user(voted_user_id)
+
+                if isinstance(game.imposter, list):
+                    if voted_user_id in game.imposter:
+                        await ctx.send(f"Congratulations! The majority voted for one of the imposters: {voted_user.name}. You win!")
+                    else:
+                        imposter_users = [await client.fetch_user(imposter_id) for imposter_id in game.imposter]
+                        imposters_names = ', '.join(user.name for user in imposter_users)
+                        await ctx.send(f"Sorry, you lose. The majority voted for {voted_user.name}, but the imposters were {imposters_names}.")
+                else:
+                    if voted_user_id == game.imposter:
+                        await ctx.send(f"Congratulations! The majority voted for the imposter: {voted_user.name}. You win!")
+                    else:
+                        imposter_user = await client.fetch_user(game.imposter)
+                        await ctx.send(f"Sorry, you lose. The majority voted for {voted_user.name}, but the imposter was {imposter_user.name}.")
+            else:
+                imposter_users = [await client.fetch_user(imposter_id) for imposter_id in game.imposter]
+                imposters_names = ', '.join(user.name for user in imposter_users)
+                await ctx.send(f"There was a tie in the votes. No majority decision was made. The imposters were {imposters_names}.")
+
+            await ask_replay(ctx)
+    except Exception as e:
+        logging.error(f"An error occurred during the voting process: {e}")
+        await ctx.send("An error occurred during the voting process. Please try again.")
         for reaction in voting_message.reactions:
             await reaction.clear()
-
-        if len(max_voted_users) == 1:
-            voted_user_index = max_voted_users[0]
-            voted_user_id = game.joined_users[voted_user_index]
-            voted_user = await client.fetch_user(voted_user_id)
-
-            if voted_user_id == game.imposter:
-                await ctx.send(f"Congratulations! The majority voted for the imposter: {voted_user.name}. You win!")
-            else:
-                imposter_user = await client.fetch_user(game.imposter)
-                await ctx.send(f"Sorry, you lose. The majority voted for {voted_user.name}, but the imposter was {imposter_user.name}.")
-        else:
-            await ctx.send("There was a tie in the votes. No majority decision was made.")
-
-        await ask_replay(ctx)
-    except asyncio.TimeoutError:
-        await ctx.send("Voting time has expired.")
-
-        for reaction in voting_message.reactions:
-            await reaction.clear()
-
-        max_votes = max(votes)
-        max_voted_users = [i for i, v in enumerate(votes) if v == max_votes]
-
-        if len(max_voted_users) == 1:
-            voted_user_index = max_voted_users[0]
-            voted_user_id = game.joined_users[voted_user_index]
-            voted_user = await client.fetch_user(voted_user_id)
-
-            if voted_user_id == game.imposter:
-                await ctx.send(f"Congratulations! The majority voted for the imposter: {voted_user.name}. You win!")
-            else:
-                imposter_user = await client.fetch_user(game.imposter)
-                await ctx.send(f"Sorry, you lose. The majority voted for {voted_user.name}, but the imposter was {imposter_user.name}.")
-        else:
-            imposter_user = await client.fetch_user(game.imposter)
-            await ctx.send(f"There was a tie in the votes. No majority decision was made. The imposter was {imposter_user.name}.")
-
         await ask_replay(ctx)
 
 async def ask_replay(ctx):
@@ -253,6 +307,7 @@ async def help_adv(ctx):
         "removeword <line_number>": "Remove a word from the word list by its line number (admin only).",
         "request <word>": "Add a new word to the nouns list.",
         "resets": "Reset the current game (admin only).",
+        "hard": "sets it to 2 imposters if there is more than 7 players",
         "word <new_word>": "Set the word for the game manually (admin only).",
     }
 
@@ -319,6 +374,33 @@ async def quit(ctx):
         await ctx.send(f"{ctx.author.name} has left the game.")
     else:
         await ctx.send("You are not in the game.")
+
+@client.command()
+async def mute(ctx, member: discord.Member, duration: int):
+    if ctx.author.name != "mrblank7604":
+        await ctx.send("You do not have permission to use this command.")
+        return
+
+    # Create a muted role if it doesn't exist
+    muted_role = get(ctx.guild.roles, name="Muted")
+    if not muted_role:
+        try:
+            muted_role = await ctx.guild.create_role(name="Muted", permissions=discord.Permissions(send_messages=False))
+            for channel in ctx.guild.channels:
+                await channel.set_permissions(muted_role, send_messages=False, speak=False)
+        except MissingPermissions:
+            await ctx.send("I do not have permission to create a 'Muted' role.")
+            return
+
+    # Add the muted role to the user
+    await member.add_roles(muted_role)
+    await ctx.send(f"User {member.display_name} has been muted for {duration} minutes.")
+
+    # Wait for the specified duration then remove the role
+    await asyncio.sleep(duration * 60)
+    await member.remove_roles(muted_role)
+    await ctx.send(f"User {member.display_name} has been unmuted.")
+
         
 @client.command()
 @commands.has_permissions(administrator=True)
