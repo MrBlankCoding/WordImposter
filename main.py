@@ -4,10 +4,10 @@ from discord.ext.commands import MemberConverter
 import random
 import asyncio
 import math
+from t import TOKEN
 intents = Intents.default()
 intents.message_content = True
 client = commands.Bot(command_prefix='?', intents=intents)
-TOKEN = ""
 
 # Dictionary to store game states for each channel
 games = {}
