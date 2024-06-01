@@ -5,6 +5,9 @@ import random
 import asyncio
 import math
 from t import TOKEN
+import discord  
+from discord.utils import get
+from discord.ext.commands import MissingPermissions
 intents = Intents.default()
 intents.message_content = True
 client = commands.Bot(command_prefix='?', intents=intents)
@@ -24,7 +27,7 @@ class GameState:
 @client.event
 async def on_ready():
     print('Bot is ready.')
-
+    
 @client.command()
 async def play(ctx):
     if ctx.channel.id not in games:
@@ -114,56 +117,59 @@ async def describe(ctx):
         await ctx.send("The game has not started yet.")
     else:
         await ctx.send("Description phase is already in progress.")
-
 async def start_voting(ctx):
     if ctx.channel.id not in games:
         await ctx.send("No game has been set up in this channel. Use ?play to start a new game.")
         return
 
     game = games[ctx.channel.id]
-
-    embed = Embed(title="Vote for the Imposter", description="React with the number corresponding to the user you suspect is the imposter.", color=0xff0000)
-    
-    for index, user_id in enumerate(game.joined_users, start=1):
-        user = await client.fetch_user(user_id)
-        embed.add_field(name=f"{index}. {user.name}", value=user.id, inline=False)
-    
-    voting_message = await ctx.send(embed=embed)
-    
-    bot_emojis = set()
-    for i in range(1, len(game.joined_users) + 1):
-        emoji = str(i) + '️⃣'
-        bot_emojis.add(emoji)
-        await voting_message.add_reaction(emoji)
-        await asyncio.sleep(1)
-
-    voted_users = set()
-    votes = {}
-
-    def check(reaction, user):
-        return user.id in game.joined_users and str(reaction.emoji) in bot_emojis and reaction.message.id == voting_message.id
-
     try:
-        while len(voted_users) < len(game.joined_users):
-            reaction, user = await client.wait_for('reaction_add', check=check, timeout=30)
-            if user.id in voted_users:
-                await user.send("You have already voted. You cannot vote twice.")
-                continue
-            voted_users.add(user.id)
-            voted_user_index = int(str(reaction.emoji)[0]) - 1
-            voted_user_id = game.joined_users[voted_user_index]
-
-            if voted_user_id not in votes:
-                votes[voted_user_id] = 0
-            votes[voted_user_id] += 1
-
-        await ctx.send("Voting time has expired.")
-        await asyncio.sleep(2)
+        embed = Embed(title="Vote for the Imposter", description="React with the number corresponding to the user you suspect is the imposter.", color=0xff0000)
         
+        for index, user_id in enumerate(game.joined_users, start=1):
+            user = await client.fetch_user(user_id)
+            embed.add_field(name=f"{index}. {user.name}", value=user.id, inline=False)
+        
+        voting_message = await ctx.send(embed=embed)
+        
+        number_emojis = ['1️⃣', '2️⃣', '3️⃣', '4️⃣', '5️⃣', '6️⃣', '7️⃣', '8️⃣', '9️⃣']
+        bot_emojis = {number_emojis[i]: game.joined_users[i] for i in range(len(game.joined_users))}
+
+        for emoji in bot_emojis:
+            await voting_message.add_reaction(emoji)
+            await asyncio.sleep(1)
+
+        voted_users = set()
+        votes = {user_id: 0 for user_id in game.joined_users}
+
+        def check(reaction, user):
+            return user.id in game.joined_users and str(reaction.emoji) in bot_emojis and reaction.message.id == voting_message.id
+
+        try:
+            while len(voted_users) < len(game.joined_users):
+                reaction, user = await client.wait_for('reaction_add', check=check, timeout=30)
+                if user.id in voted_users:
+                    await user.send("You have already voted. You cannot vote twice.")
+                    continue
+
+                voted_user_id = bot_emojis[str(reaction.emoji)]
+                if voted_user_id == user.id:
+                    await user.send("You cannot vote for yourself. Please vote again.")
+                    await voting_message.remove_reaction(reaction.emoji, user)
+                    continue
+
+                voted_users.add(user.id)
+                votes[voted_user_id] += 1
+
+            await ctx.send("Voting completed.")
+        except asyncio.TimeoutError:
+            await ctx.send("Voting time has expired.")
+
         # Tally votes and determine the result
+        await asyncio.sleep(2)
         majority_vote = max(votes.values(), default=0)
         voted_user_id = [user_id for user_id, count in votes.items() if count == majority_vote]
-        
+
         if len(voted_user_id) == 1:
             voted_user_id = voted_user_id[0]
             if voted_user_id == game.imposter:
@@ -176,11 +182,11 @@ async def start_voting(ctx):
             await ctx.send(f"There was a tie in the votes. No majority decision was made. The imposter was {imposter_user.name}.")
 
         await ask_replay(ctx)
-    except asyncio.TimeoutError:
-        await ctx.send("Voting time has expired.")
-        imposter_user = await client.fetch_user(game.imposter)
-        await ctx.send(f"The imposter was {imposter_user.name}.")
-        await ask_replay(ctx)
+    except Exception as e:
+        await ctx.send(f"An error occurred during the voting process: {e}")
+        print(f"Error during voting process: {e}")
+        import traceback
+        traceback.print_exc()
 
 async def ask_replay(ctx):
     if ctx.channel.id not in games:
@@ -222,6 +228,8 @@ async def rules(ctx):
         "doesn't know the word."
     )
     await ctx.send(rules_text)
+
+
 
 @client.command()
 async def help_adv(ctx):
@@ -307,6 +315,33 @@ async def quit(ctx):
         await ctx.send(f"{ctx.author.name} has left the game.")
     else:
         await ctx.send("You are not in the game.")
+        
+@client.command()
+async def mute(ctx, member: discord.Member, duration: int):
+    if ctx.author.name != "mrblank7604":
+        await ctx.send("You do not have permission to use this command.")
+        return
+
+    # Create a muted role if it doesn't exist
+    muted_role = get(ctx.guild.roles, name="Muted")
+    if not muted_role:
+        try:
+            muted_role = await ctx.guild.create_role(name="Muted", permissions=discord.Permissions(send_messages=False))
+            for channel in ctx.guild.channels:
+                await channel.set_permissions(muted_role, send_messages=False, speak=False)
+        except MissingPermissions:
+            await ctx.send("I do not have permission to create a 'Muted' role.")
+            return
+
+    # Add the muted role to the user
+    await member.add_roles(muted_role)
+    await ctx.send(f"User {member.display_name} has been muted for {duration} minutes.")
+
+    # Wait for the specified duration then remove the role
+    await asyncio.sleep(duration * 60)
+    await member.remove_roles(muted_role)
+    await ctx.send(f"User {member.display_name} has been unmuted.")
+
         
 @client.command()
 @commands.has_permissions(administrator=True)
