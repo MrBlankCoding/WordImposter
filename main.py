@@ -1,8 +1,8 @@
 from discord import Intents, Embed
 from discord.ext import commands
-from discord.ext.commands import MemberConverter
 import random
 import asyncio
+import os
 import math
 from t import TOKEN
 import discord  
@@ -20,6 +20,7 @@ class GameState:
         self.joined_users = []
         self.game_started = False
         self.imposter = None
+        self.bot_emojis = {}
         self.description_phase_started = False
         self.user_descriptions = {}
         self.num_rounds = 3
@@ -27,7 +28,7 @@ class GameState:
 @client.event
 async def on_ready():
     print('Bot is ready.')
-    
+
 @client.command()
 async def play(ctx):
     if ctx.channel.id not in games:
@@ -63,6 +64,30 @@ async def on_raw_reaction_add(payload):
             print("Someone is using the bot")
         member = payload.member
 
+def get_unused_word(words_file, used_words_file):
+    with open(words_file, 'r') as f:
+        words = f.read().splitlines()
+
+    if os.path.exists(used_words_file):
+        with open(used_words_file, 'r') as f:
+            used_words = f.read().splitlines()
+    else:
+        used_words = []
+
+    unused_words = list(set(words) - set(used_words))
+
+    if not unused_words:
+        # If all words have been used, reset the used words file
+        with open(used_words_file, 'w') as f:
+            f.write("")
+        unused_words = words
+
+    random_word = random.choice(unused_words)
+    with open(used_words_file, 'a') as f:
+        f.write(random_word + '\n')
+
+    return random_word
+
 @client.command()
 async def start(ctx):
     if ctx.channel.id not in games:
@@ -73,7 +98,7 @@ async def start(ctx):
 
     if not game.game_started:
         if len(game.joined_users) > 2:
-            random_word = generate_random_word('nouns.txt')
+            random_word = get_unused_word('nouns.txt', 'used_words.txt')
             game.imposter = random.choice(game.joined_users)
             for user_id in game.joined_users:
                 user = await client.fetch_user(user_id)
@@ -101,14 +126,18 @@ async def describe(ctx):
         await ctx.send("Description phase has started. Users, please describe your words one by one.")
         for round_number in range(game.num_rounds):
             await ctx.send(f"Round {round_number + 1}")
-            for user_id in game.joined_users:
+            joined_users = game.joined_users.copy()
+            random.shuffle(joined_users)
+            for user_id in joined_users:
                 user = await client.fetch_user(user_id)
                 await ctx.send(f"{user.mention}, please describe your word.")
                 def check(m):
                     return m.author.id == user_id and m.channel == ctx.channel
                 try:
                     description_msg = await client.wait_for('message', check=check, timeout=30)
-                    game.user_descriptions[user_id] = description_msg.content
+                    if user_id not in game.user_descriptions:
+                        game.user_descriptions[user_id] = []
+                    game.user_descriptions[user_id].append(description_msg.content)
                 except asyncio.TimeoutError:
                     await ctx.send(f"{user.mention}, you took too long to respond. Your description was not recorded.")
         await ctx.send("Description phase completed. Commence voting.")
@@ -117,6 +146,90 @@ async def describe(ctx):
         await ctx.send("The game has not started yet.")
     else:
         await ctx.send("Description phase is already in progress.")
+
+@client.command()
+async def recall(ctx):
+    if ctx.channel.id not in games:
+        await ctx.send("No game has been set up in this channel. Use ?play to start a new game.")
+        return
+
+    game = games[ctx.channel.id]
+    if not game.user_descriptions:
+        await ctx.send("No descriptions have been recorded yet.")
+        return
+
+    embed = discord.Embed(title="User Descriptions", color=discord.Color.blue())
+    for user_id, descriptions in game.user_descriptions.items():
+        user = await client.fetch_user(user_id)
+        description_list = "\n".join([f"{i+1}. {desc}" for i, desc in enumerate(descriptions)])
+        embed.add_field(name=user.name, value=description_list, inline=False)
+
+    await ctx.send(embed=embed)
+
+
+async def initiate_voting(ctx, game):
+    embed = discord.Embed(title="Vote for the Imposter", description="React with the number corresponding to the user you suspect is the imposter.", color=0xff0000)
+
+    for index, user_id in enumerate(game.joined_users, start=1):
+        user = await client.fetch_user(user_id)
+        embed.add_field(name=f"{index}. {user.name}", value=user.id, inline=False)
+
+    voting_message = await ctx.send(embed=embed)
+
+    number_emojis = ['1️⃣', '2️⃣', '3️⃣', '4️⃣', '5️⃣', '6️⃣', '7️⃣', '8️⃣', '9️⃣']
+    bot_emojis = {number_emojis[i]: game.joined_users[i] for i in range(len(game.joined_users))}
+
+    for emoji in bot_emojis:
+        await voting_message.add_reaction(emoji)
+        await asyncio.sleep(1)
+
+    return voting_message, bot_emojis
+
+async def tally_votes(ctx, game, voting_message, bot_emojis):
+    voted_users = set()
+    votes = {user_id: 0 for user_id in game.joined_users}
+
+    def check(reaction, user):
+        return user.id in game.joined_users and str(reaction.emoji) in bot_emojis and reaction.message.id == voting_message.id
+
+    try:
+        while len(voted_users) < len(game.joined_users):
+            reaction, user = await bot.wait_for('reaction_add', check=check, timeout=30)
+            if user.id in voted_users:
+                await user.send("You have already voted. You cannot vote twice.")
+                continue
+
+            voted_user_id = bot_emojis[str(reaction.emoji)]
+            if voted_user_id == user.id:
+                await user.send("You cannot vote for yourself. Please vote again.")
+                await voting_message.remove_reaction(reaction.emoji, user)
+                continue
+
+            voted_users.add(user.id)
+            votes[voted_user_id] += 1
+
+        await ctx.send("Voting completed.")
+    except asyncio.TimeoutError:
+        await ctx.send("Voting time has expired.")
+
+    await asyncio.sleep(2)
+    majority_vote = max(votes.values(), default=0)
+    voted_user_id = [user_id for user_id, count in votes.items() if count == majority_vote]
+
+    if len(voted_user_id) == 1:
+        voted_user_id = voted_user_id[0]
+        if voted_user_id == game.imposter:
+            await ctx.send(f"Congratulations! You win. The user you suspected ({(await bot.fetch_user(voted_user_id)).name}) was the imposter!")
+        else:
+            imposter_user = await bot.fetch_user(game.imposter)
+            await ctx.send(f"Sorry, you lose. The imposter was {imposter_user.name}.")
+    else:
+        imposter_user = await bot.fetch_user(game.imposter)
+        await ctx.send(f"There was a tie in the votes. No majority decision was made. The imposter was {imposter_user.name}.")
+
+    await ask_replay(ctx)
+
+@client.command()
 async def start_voting(ctx):
     if ctx.channel.id not in games:
         await ctx.send("No game has been set up in this channel. Use ?play to start a new game.")
@@ -124,70 +237,31 @@ async def start_voting(ctx):
 
     game = games[ctx.channel.id]
     try:
-        embed = Embed(title="Vote for the Imposter", description="React with the number corresponding to the user you suspect is the imposter.", color=0xff0000)
-        
-        for index, user_id in enumerate(game.joined_users, start=1):
-            user = await client.fetch_user(user_id)
-            embed.add_field(name=f"{index}. {user.name}", value=user.id, inline=False)
-        
-        voting_message = await ctx.send(embed=embed)
-        
-        number_emojis = ['1️⃣', '2️⃣', '3️⃣', '4️⃣', '5️⃣', '6️⃣', '7️⃣', '8️⃣', '9️⃣']
-        bot_emojis = {number_emojis[i]: game.joined_users[i] for i in range(len(game.joined_users))}
-
-        for emoji in bot_emojis:
-            await voting_message.add_reaction(emoji)
-            await asyncio.sleep(1)
-
-        voted_users = set()
-        votes = {user_id: 0 for user_id in game.joined_users}
-
-        def check(reaction, user):
-            return user.id in game.joined_users and str(reaction.emoji) in bot_emojis and reaction.message.id == voting_message.id
-
-        try:
-            while len(voted_users) < len(game.joined_users):
-                reaction, user = await client.wait_for('reaction_add', check=check, timeout=30)
-                if user.id in voted_users:
-                    await user.send("You have already voted. You cannot vote twice.")
-                    continue
-
-                voted_user_id = bot_emojis[str(reaction.emoji)]
-                if voted_user_id == user.id:
-                    await user.send("You cannot vote for yourself. Please vote again.")
-                    await voting_message.remove_reaction(reaction.emoji, user)
-                    continue
-
-                voted_users.add(user.id)
-                votes[voted_user_id] += 1
-
-            await ctx.send("Voting completed.")
-        except asyncio.TimeoutError:
-            await ctx.send("Voting time has expired.")
-
-        # Tally votes and determine the result
-        await asyncio.sleep(2)
-        majority_vote = max(votes.values(), default=0)
-        voted_user_id = [user_id for user_id, count in votes.items() if count == majority_vote]
-
-        if len(voted_user_id) == 1:
-            voted_user_id = voted_user_id[0]
-            if voted_user_id == game.imposter:
-                await ctx.send(f"Congratulations! You win. The user you suspected ({(await client.fetch_user(voted_user_id)).name}) was the imposter!")
-            else:
-                imposter_user = await client.fetch_user(game.imposter)
-                await ctx.send(f"Sorry, you lose. The imposter was {imposter_user.name}.")
-        else:
-            imposter_user = await client.fetch_user(game.imposter)
-            await ctx.send(f"There was a tie in the votes. No majority decision was made. The imposter was {imposter_user.name}.")
-
-        await ask_replay(ctx)
+        voting_message, bot_emojis = await initiate_voting(ctx, game)
+        game.voting_message_id = voting_message.id
+        game.bot_emojis = bot_emojis
+        await ctx.send("Voting has started. Use ?tally to tally the votes when everyone has voted.")
     except Exception as e:
         await ctx.send(f"An error occurred during the voting process: {e}")
         print(f"Error during voting process: {e}")
         import traceback
         traceback.print_exc()
 
+@client.command()
+async def tally(ctx):
+    if ctx.channel.id not in games:
+        await ctx.send("No game has been set up in this channel. Use ?play to start a new game.")
+        return
+
+    game = games[ctx.channel.id]
+    try:
+        voting_message = await ctx.fetch_message(game.voting_message_id)
+        await tally_votes(ctx, game, voting_message, game.bot_emojis)
+    except Exception as e:
+        await ctx.send(f"An error occurred during the tallying process: {e}")
+        print(f"Error during tallying process: {e}")
+        import traceback
+        traceback.print_exc()
 async def ask_replay(ctx):
     if ctx.channel.id not in games:
         await ctx.send("No game has been set up in this channel. Use ?play to start a new game.")
@@ -239,6 +313,8 @@ async def help_adv(ctx):
         "play": "Start a new game or join an existing one by reacting with ✅.",
         "start": "Begin the game once all players have joined.",
         "describe": "Start the description phase where players describe their words.",
+        "start_voting": "Start the voting phase after the description phase.",
+        "tally": "Tally the votes and determine the imposter.",
         "rounds <number>": "Set the number of description rounds.",
         "rules": "Show the rules of the game.",
         "status": "Show the current status of the game.",
@@ -250,6 +326,7 @@ async def help_adv(ctx):
         "request <word>": "Add a new word to the nouns list.",
         "resets": "Reset the current game (admin only).",
         "word <new_word>": "Set the word for the game manually (admin only).",
+        "help_adv": "Show this help message.",
     }
 
     for command, description in commands.items():
@@ -315,7 +392,7 @@ async def quit(ctx):
         await ctx.send(f"{ctx.author.name} has left the game.")
     else:
         await ctx.send("You are not in the game.")
-        
+
 @client.command()
 async def mute(ctx, member: discord.Member, duration: int):
     if ctx.author.name != "mrblank7604":
@@ -342,7 +419,7 @@ async def mute(ctx, member: discord.Member, duration: int):
     await member.remove_roles(muted_role)
     await ctx.send(f"User {member.display_name} has been unmuted.")
 
-        
+
 @client.command()
 @commands.has_permissions(administrator=True)
 async def kick(ctx, member: commands.MemberConverter):
@@ -358,7 +435,8 @@ async def kick(ctx, member: commands.MemberConverter):
         try:
             await member.send("You have been kicked from the game by an administrator.")
         except:
-            pass  # If the user has DMs disabled, we can't notify them
+            pass
+            
     else:
         await ctx.send(f"{member.name} is not in the game.")
 
@@ -402,7 +480,7 @@ async def resets(ctx):
             await ctx.send("No game is currently in progress.")
     else:
         await ctx.send("You don't have permission to force quit the game.")
-        
+
 
 @client.command()
 @commands.has_permissions(administrator=True)
@@ -431,7 +509,7 @@ async def wordlist(ctx):
             if not words:
                 await ctx.send("The word list is currently empty.")
                 return
-            
+
             pages = math.ceil(len(words) / 20)
             current_page = 0
 
@@ -442,7 +520,7 @@ async def wordlist(ctx):
                 for i, word in enumerate(words[start:end], start=start + 1):
                     embed.add_field(name=f"{i}.", value=word, inline=False)
                 return embed
-            
+
             message = await ctx.send(embed=get_page_embed(current_page))
 
             if pages > 1:
@@ -455,7 +533,7 @@ async def wordlist(ctx):
                 while True:
                     try:
                         reaction, user = await client.wait_for('reaction_add', check=check, timeout=60.0)
-                        
+
                         if str(reaction.emoji) == '➡️':
                             if current_page < pages - 1:
                                 current_page += 1
@@ -467,7 +545,7 @@ async def wordlist(ctx):
                                 current_page -= 1
                                 await message.edit(embed=get_page_embed(current_page))
                             await message.remove_reaction(reaction, user)
-                    
+
                     except asyncio.TimeoutError:
                         break
 
@@ -484,7 +562,7 @@ def generate_random_word(file_path):
             return random.choice(nouns)
     except FileNotFoundError:
         return "default_word"  # Default word if the file is not found
-        
+
 @removeword.error
 async def removeword_error(ctx, error):
     if isinstance(error, commands.MissingPermissions):
